@@ -70,7 +70,10 @@ pipeline {
                             latest_telemetry="\$(git ls-remote --tags git@gitlab:gitlab-instance-3071330f/telemetry.git refs/tags/${VERSION}.* | awk '{print \$2}' | cut -d '/' -f3 | tail -1)"
                             latest_analytics="\$(git ls-remote --tags git@gitlab:gitlab-instance-3071330f/analytics.git refs/tags/${VERSION}.* | awk '{print \$2}' | cut -d '/' -f3 | tail -1)"
 
-                            mvn -s ${SETTINGS} package -Dserver.password=${PASSWORD} -Dserver.username=${USERNAME} -Dtelemetry.version=\${latest_telemetry} -Danalytics.version=\${latest_analytics}
+                            mvn -s ${SETTINGS} versions:set-property -Dproperty=telemetry.version -DnewVersion=\${latest_telemetry}
+                            mvn -s ${SETTINGS} versions:set-property -Dproperty=analytics.version -DnewVersion=\${latest_analytics}
+
+                            mvn -s ${SETTINGS} package -Dserver.password=${PASSWORD} -Dserver.username=${USERNAME} 
                         """
                     }
                 } 
