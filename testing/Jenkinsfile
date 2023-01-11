@@ -1,0 +1,83 @@
+pipeline {
+    options {
+        timestamps()
+        gitLabConnection('gitlab')
+    }
+
+    tools {
+        maven 'Maven 3.6'
+        jdk 'jdk-8'
+    }
+
+    agent any
+
+    stages {
+        stage('checkout'){
+            steps {
+                deleteDir()
+                checkout scm
+                sh "mvn clean"
+                sh "git checkout ${GIT_BRANCH}"
+            }
+        }
+ 
+        stage('build&unit_tests') { 
+            
+            when { branch "main" }
+ 
+            steps{
+                // Add securty lair to the password in the setting.xml file
+                withCredentials([usernamePassword(credentialsId: 'Artifactory-deploy', passwordVariable: 'PASSWORD', usernameVariable: 'USERNAME')]){
+                    // Load the setting.xml file and use it
+                    configFileProvider([configFile(fileId: 'artifactory-settings', variable: 'SETTINGS')]) {
+                        sh "mvn -s ${SETTINGS} package -Dserver.password=${PASSWORD} -Dserver.username=${USERNAME}"
+                    }
+                }
+                
+            }
+        }
+
+        stage('e2e_test') {
+            
+            when { branch "main" }
+            
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'Artifactory-deploy', passwordVariable: 'PASSWORD', usernameVariable: 'USERNAME')]){
+                    sh """
+                        curl -u ${USERNAME}:${PASSWORD} "http://artifactory:8081/artifactory/libs-snapshot-local/com/lidar/analytics/99-SNAPSHOT/analytics-99-20230110.080526-1.jar" -o analytics.jar
+                        curl -u ${USERNAME}:${PASSWORD} "http://artifactory:8081/artifactory/libs-snapshot-local/com/lidar/telemetry/99-SNAPSHOT/telemetry-99-20230110.111813-2.jar" -o telemetry.jar
+
+                        mv tests-full.txt tests.txt
+                        java -cp target/simulator-99-SNAPSHOT.jar:telemetry.jar:analytics.jar com.lidar.simulation.Simulator
+                    """
+                }
+               
+            }
+        }
+
+        stage('publish'){
+
+            when { branch "main" }
+
+            steps{
+                // Add securty lair to the password in the setting.xml file
+                withCredentials([usernamePassword(credentialsId: 'Artifactory-deploy', passwordVariable: 'PASSWORD', usernameVariable: 'USERNAME')]){
+                    // Load the setting.xml file and use it
+                    configFileProvider([configFile(fileId: 'artifactory-settings', variable: 'SETTINGS')]) {
+                        sh "mvn -s ${SETTINGS} deploy -Dserver.password=${PASSWORD} -Dserver.username=${USERNAME}"
+                    }
+                }
+            }
+        }
+       
+    }
+
+    post{
+        success{
+            updateGitlabCommitStatus name: 'YEA!!! Succuss', state: 'success'
+        }
+        failure {
+            updateGitlabCommitStatus name: 'Failed', state: 'failed'
+        }
+    }
+}

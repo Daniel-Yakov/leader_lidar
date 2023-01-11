@@ -1,0 +1,151 @@
+def VERSION
+pipeline {
+    options {
+        timestamps()
+        gitLabConnection('gitlab')
+    }
+
+    tools {
+        maven 'Maven 3.6'
+        jdk 'jdk-8'
+    }
+
+    agent any
+
+    stages {
+        stage('checkout'){
+            steps {
+                deleteDir()
+                checkout scm
+                sh "mvn clean"
+                sh "git checkout ${GIT_BRANCH}"
+            }
+        }
+
+        stage('tag'){
+
+            when { branch "release/*" }
+
+            steps{
+                script {
+                    VERSION = sh(
+                        script: "echo ${GIT_BRANCH} | cut -d '/' -f2",
+                        returnStdout: true 
+                    ).trim()
+                } 
+
+                // calculate the x.y.z tag number
+                sh """ 
+                    git checkout release/${VERSION}
+                    
+                    NEXTVERSION=\$(git describe --tags | cut -d '-' -f1 | awk -F. -v OFS=. '{\$NF += 1 ; print}')
+
+                    if [ "\$NEXTVERSION" = "" ]; then
+                        NEXTVERSION="${VERSION}.1"
+                    fi
+
+                    NEXTVERSION_NO_PATCH=\$(echo \$NEXTVERSION | cut -d '.' -f1-2)
+
+                    if [ "\$NEXTVERSION_NO_PATCH" != "${VERSION}" ]; then
+                        NEXTVERSION="${VERSION}.1"
+                    fi
+
+                    mvn versions:set -DnewVersion=\${NEXTVERSION}
+
+                    echo "\$NEXTVERSION" > v.txt
+                """
+            }
+        }
+ 
+        stage('build&unit_tests') { 
+             
+            when { branch "release/*" } 
+ 
+            steps{
+                // Add securty lair to the password in the setting.xml file
+                withCredentials([usernamePassword(credentialsId: 'Artifactory-deploy', passwordVariable: 'PASSWORD', usernameVariable: 'USERNAME')]){
+                    // Load the setting.xml file and use it
+                    configFileProvider([configFile(fileId: 'artifactory-settings', variable: 'SETTINGS')]) {
+                        sh """
+                            latest_telemetry="\$(git ls-remote --tags git@gitlab:gitlab-instance-3071330f/telemetry.git refs/tags/${VERSION}.* | awk '{print \$2}' | cut -d '/' -f3 | tail -1)"
+                            latest_analytics="\$(git ls-remote --tags git@gitlab:gitlab-instance-3071330f/analytics.git refs/tags/${VERSION}.* | awk '{print \$2}' | cut -d '/' -f3 | tail -1)"
+
+                            mvn -s ${SETTINGS} package -Dserver.password=${PASSWORD} -Dserver.username=${USERNAME} -Dtelemetry.version=\${latest_telemetry} -Danalytics.version=\${latest_analytics}
+                        """
+                    }
+                } 
+            }
+        }
+
+        stage('e2e_test') {
+
+            when { branch "release/*" }
+
+            steps {
+                script {
+                    def tag = sh (
+                        script: 'cat v.txt',
+                        returnStdout: true
+                    ).trim()
+                    
+                    withCredentials([usernamePassword(credentialsId: 'Artifactory-deploy', passwordVariable: 'PASSWORD', usernameVariable: 'USERNAME')]){
+                        sh """
+                            unzip target/leader-product-${tag}-leader-lidar.zip
+
+                            curl -u ${USERNAME}:${PASSWORD} "http://artifactory:8081/artifactory/libs-snapshot-local/com/lidar/simulator/99-SNAPSHOT/simulator-99-20230110.105429-5.jar" -o simulator.jar
+
+                            telementry=\$(find . -name "telemetry-*.jar")
+                            analytics=\$(find . -name "analytics-*.jar")
+
+                            java -cp simulator.jar:\${telementry}:\${analytics} com.lidar.simulation.Simulator
+                        """
+                    }
+                    
+                }
+                
+            }
+        }
+
+        stage('publish'){
+
+            when { branch "release/*" }
+
+            steps{
+                // Add securty lair to the password in the setting.xml file
+                withCredentials([usernamePassword(credentialsId: 'Artifactory-deploy', passwordVariable: 'PASSWORD', usernameVariable: 'USERNAME')]){
+                    // Load the setting.xml file and use it
+                    configFileProvider([configFile(fileId: 'artifactory-settings', variable: 'SETTINGS')]) {
+                        sh "mvn -s ${SETTINGS} deploy -Dserver.password=${PASSWORD} -Dserver.username=${USERNAME}"
+                    }
+                }
+            }
+        }
+
+        stage('push_tag'){
+
+            when { branch "release/*" }
+
+            steps {
+                script {
+                    def tag = sh (
+                        script: 'cat v.txt',
+                        returnStdout: true
+                    ).trim()
+
+                    sh "git tag ${tag} && git push origin ${tag}"
+                }
+                
+            }
+        }
+       
+    }
+
+    post{
+        success{
+            updateGitlabCommitStatus name: 'YEA!!! Succuss', state: 'success'
+        }
+        failure {
+            updateGitlabCommitStatus name: 'Failed', state: 'failed'
+        }
+    }
+}

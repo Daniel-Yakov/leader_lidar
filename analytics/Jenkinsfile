@@ -1,0 +1,158 @@
+pipeline {
+    options {
+        timestamps()
+        gitLabConnection('gitlab')
+    }
+
+    tools {
+        maven 'Maven 3.6'
+        jdk 'jdk-8'
+    }
+
+    agent any
+
+    stages {
+        stage('checkout'){
+            steps {
+                deleteDir()
+                checkout scm
+                sh "mvn clean"
+                sh "git checkout ${GIT_BRANCH}"
+            }
+        }
+
+        stage('tag'){
+
+            when { branch "release/*" }
+
+            steps{
+                script {
+                    VERSION = sh(
+                        script: "echo ${GIT_BRANCH} | cut -d '/' -f2",
+                        returnStdout: true 
+                    ).trim()
+                } 
+
+                // calculate the x.y.z tag number
+                sh """ 
+                    git checkout release/${VERSION}
+                    
+                    NEXTVERSION=\$(git describe --tags | cut -d '-' -f1 | awk -F. -v OFS=. '{\$NF += 1 ; print}')
+
+                    if [ "\$NEXTVERSION" = "" ]; then
+                        NEXTVERSION="${VERSION}.1"
+                    fi
+
+                    NEXTVERSION_NO_PATCH=\$(echo \$NEXTVERSION | cut -d '.' -f1-2)
+
+                    if [ "\$NEXTVERSION_NO_PATCH" != "${VERSION}" ]; then
+                        NEXTVERSION="${VERSION}.1"
+                    fi
+
+                    mvn versions:set -DnewVersion=\${NEXTVERSION}
+
+                    echo "\$NEXTVERSION" > v.txt
+                """
+            } 
+        }
+ 
+        stage('build&unit_tests') { 
+            
+            when { anyOf { branch "main"; branch "feature/*"; branch "release/*" } }
+ 
+            steps{
+                sh "mvn package"
+            }
+        }
+
+        stage('e2e_test') {
+            
+            when { anyOf{ branch "main"; branch "feature/*"; branch "release/*" } }
+            
+            steps {
+                script {
+                    // extract the commit message
+                    def commit_msg = sh(
+                        script: "git log -1 --pretty=%B ${GIT_COMMIT}",
+                        returnStdout: true
+                    ).trim()
+
+                    VERSION = sh (
+                        script: "echo $GIT_BRANCH | cut -d '/' -f2",
+                        returnStdout: true 
+                    ).trim()
+
+                    println(GIT_BRANCH)
+                    
+                    withCredentials([usernamePassword(credentialsId: 'Artifactory-deploy', passwordVariable: 'PASSWORD', usernameVariable: 'USERNAME')]){
+                        if (GIT_BRANCH.equals('main') || commit_msg.contains('#e2e')){
+                            sh """
+                                curl -u ${USERNAME}:${PASSWORD} "http://artifactory:8081/artifactory/libs-snapshot-local/com/lidar/telemetry/99-SNAPSHOT/telemetry-99-20230110.111813-2.jar" -o telemetry.jar
+                                curl -u ${USERNAME}:${PASSWORD} "http://artifactory:8081/artifactory/libs-snapshot-local/com/lidar/simulator/99-SNAPSHOT/simulator-99-20230110.105429-5.jar" -o simulator.jar
+
+                                java -cp simulator.jar:telemetry.jar:target/analytics-99-SNAPSHOT.jar com.lidar.simulation.Simulator
+                            """
+                        } else if (GIT_BRANCH.contains("release/")){
+                            def tag = sh (
+                                script: 'cat v.txt',
+                                returnStdout: true
+                            ).trim()
+                            sh """
+                                latest_telemetry="\$(git ls-remote --tags git@gitlab:gitlab-instance-3071330f/telemetry.git refs/tags/${VERSION}.* | awk '{print \$2}' | cut -d '/' -f3 | tail -1)"
+
+                                echo \$latest_telemetry
+
+                                curl -u ${USERNAME}:${PASSWORD} "http://artifactory:8081/artifactory/libs-release-local/com/lidar/telemetry/\${latest_telemetry}/telemetry-\${latest_telemetry}.jar" -o telemetry.jar
+                                curl -u ${USERNAME}:${PASSWORD} "http://artifactory:8081/artifactory/libs-snapshot-local/com/lidar/simulator/99-SNAPSHOT/simulator-99-20230110.105429-5.jar" -o simulator.jar
+
+                                java -cp simulator.jar:telemetry.jar:target/analytics-${tag}.jar com.lidar.simulation.Simulator
+                            """
+                        } 
+                    } 
+                }
+            }
+        }
+
+        stage('publish'){
+
+            when { anyOf{ branch "main"; branch "release/*" } }
+
+            steps{
+                // Add securty lair to the password in the setting.xml file
+                withCredentials([usernamePassword(credentialsId: 'Artifactory-deploy', passwordVariable: 'PASSWORD', usernameVariable: 'USERNAME')]){
+                    // Load the setting.xml file and use it
+                    configFileProvider([configFile(fileId: 'artifactory-settings', variable: 'SETTINGS')]) {
+                        sh "mvn -s ${SETTINGS} deploy -Dserver.password=${PASSWORD} -Dserver.username=${USERNAME}"
+                    }
+                }
+            }
+        }
+
+        stage('push_tag'){
+
+            when { branch "release/*" }
+
+            steps {
+                script {
+                    def tag = sh (
+                        script: 'cat v.txt',
+                        returnStdout: true
+                    ).trim()
+
+                    sh "git tag ${tag} && git push origin ${tag}"
+                }
+                
+            }
+        }
+       
+    }
+
+    post{
+        success{
+            updateGitlabCommitStatus name: 'YEA!!! Succuss', state: 'success'
+        }
+        failure {
+            updateGitlabCommitStatus name: 'Failed', state: 'failed'
+        }
+    }
+}
