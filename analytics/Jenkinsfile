@@ -85,6 +85,7 @@ pipeline {
                     println(GIT_BRANCH)
                     
                     withCredentials([usernamePassword(credentialsId: 'Artifactory-deploy', passwordVariable: 'PASSWORD', usernameVariable: 'USERNAME')]){
+                        // e2e tests for main & feature/* that contains '#e2e' in the commit message
                         if (GIT_BRANCH.equals('main') || commit_msg.contains('#e2e')){
                             sh """
                                 curl -u ${USERNAME}:${PASSWORD} "http://artifactory:8081/artifactory/libs-snapshot-local/com/lidar/telemetry/99-SNAPSHOT/telemetry-99-20230110.111813-2.jar" -o telemetry.jar
@@ -92,7 +93,9 @@ pipeline {
 
                                 java -cp simulator.jar:telemetry.jar:target/analytics-99-SNAPSHOT.jar com.lidar.simulation.Simulator
                             """
-                        } else if (GIT_BRANCH.contains("release/")){
+                        } 
+                        // e2e test for release/*
+                        else if (GIT_BRANCH.contains("release/")){
                             def tag = sh (
                                 script: 'cat v.txt',
                                 returnStdout: true
